@@ -75,6 +75,18 @@ cd backend && pytest
 
 Assertions pin the exact numbers from the reference spreadsheet rows.
 
+## Deploy (Vercel)
+
+`vercel.json` defines two services: `frontend` (Vite static build) and `backend`
+(FastAPI, entrypoint `backend/main.py`), with `/api/*` rewritten to the backend —
+same-origin, so no CORS config needed in production.
+
+In the Vercel project settings, set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (and run
+the two migrations in Supabase so the registry serves from the database). Leave
+`GOOGLE_IMPERSONATE_SERVICE_ACCOUNT` unset on Vercel — impersonation rides on local
+gcloud ADC, which doesn't exist there; sheet presets hide gracefully. For presets in
+production, wire Vercel OIDC → GCP Workload Identity Federation (keyless) later.
+
 ## Adding a tool
 
 1. Insert a row in `tools` (or `FALLBACK_TOOLS` in `backend/app/main.py`).
