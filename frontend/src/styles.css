@@ -505,6 +505,139 @@ body::after {
   padding-left: 8px;
 }
 
+.control input[readonly] {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* itemized COGS lines */
+
+.cogs-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.control--label {
+  flex: 1;
+  min-width: 0;
+}
+
+.control--label input {
+  font-family: var(--font-body);
+  font-weight: 400;
+}
+
+.control--amount {
+  flex: none;
+  width: 128px;
+}
+
+.line-x {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--hairline);
+  color: var(--faint);
+  font-size: 15px;
+  cursor: pointer;
+  transition: color 400ms var(--ease), border-color 400ms var(--ease);
+}
+
+.line-x:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: rgba(255, 107, 94, 0.4);
+}
+
+.line-x:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.add-line {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--hairline);
+  border-radius: 999px;
+  padding: 8px 16px;
+  color: var(--muted);
+  font: 500 11px var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 400ms var(--ease), border-color 400ms var(--ease);
+}
+
+.add-line:hover {
+  color: var(--accent);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+
+.group-label--row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.save-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 4px;
+}
+
+.save-btn {
+  flex: none;
+  border-style: solid;
+  white-space: nowrap;
+}
+
+.save-btn:not(:disabled):hover {
+  color: var(--accent);
+}
+
+.save-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chip--exp {
+  color: #e8b93e;
+  border-color: rgba(232, 185, 62, 0.4);
+  background: rgba(232, 185, 62, 0.07);
+}
+
+.calc-btn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 15px 20px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: 600 13px var(--font-mono);
+  letter-spacing: 0.16em;
+  cursor: pointer;
+  transition: transform 500ms var(--ease), filter 500ms var(--ease);
+}
+
+.calc-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.calc-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.calc-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ── results ── */
 
 .results {

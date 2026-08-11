@@ -2,14 +2,21 @@
 
 import logging
 import os
+import time
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .roas import compute
-from .sheet import Product, SheetUnavailable, fetch_products, unavailable_hint
+from .sheet import (
+    Product,
+    SheetUnavailable,
+    append_product,
+    fetch_products,
+    unavailable_hint,
+)
 
 log = logging.getLogger("toolhub")
 
@@ -119,16 +126,67 @@ async def tools() -> list[Tool]:
     return FALLBACK_TOOLS
 
 
-@app.get("/api/roas/products", response_model=list[Product])
-async def roas_products() -> list[Product]:
-    """Product presets from the reference Google Sheet (live source of truth)."""
+CURRENCIES = ("EUR", "USD", "GBP", "CHF", "CAD", "AUD", "SEK", "AED")
+FX_URL = "https://open.er-api.com/v6/latest/USD"
+FX_TTL_SECONDS = 12 * 3600
+
+_fx_cache: tuple[float, dict[str, float]] | None = None
+
+
+class FxResponse(BaseModel):
+    base: str
+    rates: dict[str, float]
+
+
+@app.get("/api/fx", response_model=FxResponse)
+async def fx_rates() -> FxResponse:
+    """USD-based exchange rates for the supported currencies (cached ~12h)."""
+    global _fx_cache
+    if _fx_cache and time.monotonic() - _fx_cache[0] < FX_TTL_SECONDS:
+        return FxResponse(base="USD", rates=_fx_cache[1])
     try:
-        return await fetch_products()
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(FX_URL)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as exc:
+        if _fx_cache:  # serve stale rather than fail
+            return FxResponse(base="USD", rates=_fx_cache[1])
+        raise HTTPException(status_code=503, detail="FX rates unavailable.") from exc
+    rates = {c: float(data["rates"][c]) for c in CURRENCIES if c in data.get("rates", {})}
+    if len(rates) < len(CURRENCIES):
+        log.warning("FX feed missing currencies: %s", set(CURRENCIES) - set(rates))
+    _fx_cache = (time.monotonic(), rates)
+    return FxResponse(base="USD", rates=rates)
+
+
+@app.get("/api/roas/products", response_model=list[Product])
+async def roas_products(request: Request) -> list[Product]:
+    """Product presets from the reference Google Sheet (live source of truth)."""
+    # Vercel delivers its OIDC token as a request header. Passed per-request, never
+    # stored globally: a forged value can only fail Google's checks for that request.
+    try:
+        return await fetch_products(oidc_token=request.headers.get("x-vercel-oidc-token"))
     except SheetUnavailable as exc:
         raise HTTPException(
             status_code=503,
             detail=f"Google Sheet unavailable ({exc.reason}). {unavailable_hint(exc.reason)}",
         ) from exc
+
+
+@app.post("/api/roas/products", status_code=201)
+async def add_roas_product(product: Product, request: Request) -> dict[str, int]:
+    """Append the offer as a new row on the reference sheet (needs Editor access)."""
+    try:
+        row = await append_product(
+            product, oidc_token=request.headers.get("x-vercel-oidc-token")
+        )
+    except SheetUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Google Sheet unavailable ({exc.reason}). {unavailable_hint(exc.reason)}",
+        ) from exc
+    return {"row": row}
 
 
 @app.post("/api/roas/breakeven", response_model=RoasResponse)

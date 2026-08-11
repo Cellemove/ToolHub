@@ -44,7 +44,16 @@ export interface SheetProduct {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
-  if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.ok) {
+    let message = `API ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (body.detail) message = String(body.detail);
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(message);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -53,6 +62,20 @@ export const fetchTools = (signal?: AbortSignal): Promise<Tool[]> =>
 
 export const fetchSheetProducts = (signal?: AbortSignal): Promise<SheetProduct[]> =>
   request<SheetProduct[]>("/api/roas/products", { signal });
+
+/** Append the offer as a new row on the reference sheet (needs Editor access). */
+export const saveSheetProduct = (product: SheetProduct): Promise<{ row: number }> =>
+  request<{ row: number }>("/api/roas/products", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(product),
+  });
+
+/** USD-based exchange rates for the supported currencies. */
+export const fetchFxRates = (signal?: AbortSignal): Promise<Record<string, number>> =>
+  request<{ base: string; rates: Record<string, number> }>("/api/fx", { signal }).then(
+    (r) => r.rates,
+  );
 
 export const calcRoas = (input: RoasInput, signal?: AbortSignal): Promise<RoasResult> =>
   request<RoasResult>("/api/roas/breakeven", {
