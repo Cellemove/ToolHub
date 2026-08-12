@@ -329,7 +329,7 @@ body::after {
 }
 
 .card--ghost {
-  grid-column: span 12;
+  grid-column: span 5;
   border-style: dashed;
   background: transparent;
 }

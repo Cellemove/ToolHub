@@ -32,6 +32,13 @@ function Glyph({ name }: { name: string }) {
       </svg>
     );
   }
+  if (name === "experiment") {
+    return (
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
+        <path d="M3.5 10h5M8.5 10c3 0 3-4.5 6-4.5H17M8.5 10c3 0 3 4.5 6 4.5H17M14.5 3.5 17 5.5l-2.5 2M14.5 12.5l2.5 2-2.5 2" {...stroke} strokeLinejoin="round" />
+      </svg>
+    );
+  }
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
       <circle cx="6" cy="6" r="1.6" fill="currentColor" />
@@ -119,7 +126,7 @@ export function HubPage() {
 
       <section className="bento">
         {(tools ?? []).map((t, i) => (
-          <ToolCard key={t.slug} tool={t} wide={i % 3 === 0} delay={i * 90} />
+          <ToolCard key={t.slug} tool={t} wide={i % 2 === 0} delay={i * 90} />
         ))}
         <div className="shell card card--ghost reveal" style={{ transitionDelay: `${count * 90}ms` }}>
           <div className="core card-core">

@@ -65,7 +65,7 @@ FALLBACK_TOOLS = [
         icon="invoice",
         status="live",
         sort=3,
-        url="https://invoice2-0-tau.vercel.app",
+        url="https://invoice-checker-2.vercel.app/",
     ),
     Tool(
         slug="adfactory",
@@ -74,7 +74,16 @@ FALLBACK_TOOLS = [
         icon="ads",
         status="live",
         sort=4,
-        url="https://cellumove-ad-factory.vercel.app",
+        url="https://ad-factory-zeta.vercel.app/",
+    ),
+    Tool(
+        slug="forklane",
+        name="Forklane",
+        description="Controlled Shopify checkout and cart experiments — variants, lift and confidence.",
+        icon="experiment",
+        status="live",
+        sort=5,
+        url="https://forklane.vercel.app/",
     ),
 ]
 
