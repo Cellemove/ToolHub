@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.sheet import parse_products, parse_values
+from app.sheet import _safe_cell, next_free_row, parse_products, parse_values, row_formulas
 
 HEADER = "Nom du produit,Frais psp,TVA,Autres frais,Marge minimum,Marge cible,COGS,Prix de vente,Mult,BE,TARGET,RANGE,Comment"
 
@@ -54,6 +54,37 @@ def test_blank_fee_cells_default_to_zero() -> None:
     assert p.vat == 0.0
     assert p.min_margin == pytest.approx(0.15)
     assert p.target_margin == pytest.approx(0.20)
+
+
+def test_next_free_row_after_last_occupied_a_to_h() -> None:
+    values: list[list[object]] = [
+        ["Header"] * 8,
+        ["Named", 0.07, 0, 0.01, 0.15, 0.2, 10, 40],
+        ["", 0.07, 0, 0.01, 0.15, 0.2, 18.46, 80.39],  # unnamed but occupied
+        [],  # fully empty row inside the block
+        ["Last", 0.07, 0, 0.01, 0.15, 0.2, 5, 30],
+    ]
+    assert next_free_row(values) == 6
+    assert next_free_row([]) == 1
+    assert next_free_row([["Header"] * 8]) == 2
+
+
+def test_row_formulas_match_reference_sheet() -> None:
+    f = row_formulas(45)
+    assert f[0] == "=H45/G45"
+    assert f[1] == "=(H45)/(H45*(1-B45-C45-D45)-G45)"
+    assert f[2] == "=H45 / (H45 * (1 -B45-C45-D45 - F45) - G45)"
+    assert "ROUND(H45" in f[3] and '" - "' in f[3]
+    assert "; 2)" in f[3] and ", 2)" not in f[3]  # French locale: ';' separates args
+
+
+def test_safe_cell_neutralizes_formula_triggers() -> None:
+    assert _safe_cell("=IMPORTXML(1;2)") == "'=IMPORTXML(1;2)"
+    assert _safe_cell("+ sleeve") == "'+ sleeve"
+    assert _safe_cell("-patch") == "'-patch"
+    assert _safe_cell("@cmd") == "'@cmd"
+    assert _safe_cell("3 legging UK + sleeve") == "3 legging UK + sleeve"
+    assert _safe_cell("") == ""
 
 
 def test_wrong_tab_shape_yields_nothing() -> None:

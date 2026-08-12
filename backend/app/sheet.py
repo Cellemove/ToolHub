@@ -2,15 +2,19 @@
 
 Access paths, in priority order:
 
-1. Keyless impersonation (private sheet, no key files): set
-   ``GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`` to the service account email. Local
-   ADC (``gcloud auth application-default login``) mints short-lived tokens as
-   that account via the IAM Credentials API. Share the sheet with the service
-   account's email as Viewer.
-2. Service-account key: set ``GOOGLE_APPLICATION_CREDENTIALS`` to a key JSON.
+1. Workload Identity Federation (deployed on Vercel, keyless): Vercel's runtime
+   injects ``VERCEL_OIDC_TOKEN``; with ``GOOGLE_WIF_AUDIENCE`` set, it is
+   exchanged at Google STS for a federated token, then for a token as the
+   service account named by ``GOOGLE_IMPERSONATE_SERVICE_ACCOUNT``.
+2. Keyless impersonation (local dev): ``GOOGLE_IMPERSONATE_SERVICE_ACCOUNT``
+   alone — local ADC (``gcloud auth application-default login``) mints
+   short-lived tokens as that account via the IAM Credentials API.
+3. Service-account key: set ``GOOGLE_APPLICATION_CREDENTIALS`` to a key JSON.
    Auth is a locally-signed JWT against the Sheets API v4.
-3. Public CSV export: used when neither is configured; works only when the
+4. Public CSV export: used when nothing is configured; works only when the
    sheet is link-shared as Viewer.
+
+Whichever path, share the sheet with the service account's email as Viewer.
 
 Column layout mirrors the xlsx: name, PSP, VAT, other fees, min margin,
 target margin, COGS, price (A..H).
@@ -30,16 +34,17 @@ from google.auth import jwt as google_jwt
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 DEFAULT_SHEET_ID = "1-OEZQk_HvpfcGEfc1HWyrymxLNEI6mALgapLtZiPIRU"
 DEFAULT_SHEET_GID = "1196565987"
 CSV_URL = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
 API_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"  # rw: presets read + row append
 
 
 class Product(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     psp_fee: float
     vat: float
     other_fees: float
@@ -59,9 +64,15 @@ def unavailable_hint(reason: str) -> str:
     email = service_account_email() or "the service account"
     hints = {
         "no_access": f"Share the sheet with {email} as Viewer to enable presets.",
+        "no_write_access": f"Adding rows needs write access — share the sheet with {email} "
+        "as Editor (it currently has Viewer).",
         "bad_credentials": "GOOGLE_APPLICATION_CREDENTIALS does not point to a valid service-account key.",
         "impersonation_failed": f"Could not impersonate {email} — check ADC "
         "(gcloud auth application-default login) and the serviceAccountTokenCreator binding.",
+        "wif_failed": f"Workload Identity Federation failed — check GOOGLE_WIF_AUDIENCE, "
+        f"the provider's attribute condition, and the workloadIdentityUser binding on {email}.",
+        "oidc_token_missing": "No Vercel OIDC token on this request — enable OpenID Connect "
+        "Federation in the Vercel project (Settings → Security), then redeploy.",
         "private": "Configure service-account access (private sheet), "
         "or share the sheet as 'Anyone with the link — Viewer'.",
         "gid_not_found": "No tab with that gid — check ROAS_SHEET_GID against the tab's URL.",
@@ -164,7 +175,7 @@ def _impersonation_token(target: str) -> str:
             _imp = impersonated_credentials.Credentials(  # type: ignore[no-untyped-call]
                 source_credentials=source,
                 target_principal=target,
-                target_scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+                target_scopes=[SHEETS_SCOPE],
             )
         if not _imp.valid:
             _imp.refresh(Request())  # type: ignore[no-untyped-call]
@@ -190,6 +201,39 @@ def _key_file_token(path: str) -> str:
     return token.decode() if isinstance(token, bytes) else str(token)
 
 
+async def _wif_token(oidc: str | None) -> str:
+    """SA token via Workload Identity Federation from Vercel's OIDC token — keyless."""
+    oidc = oidc or os.getenv("VERCEL_OIDC_TOKEN")
+    if not oidc:
+        raise SheetUnavailable("oidc_token_missing")
+    audience = os.environ["GOOGLE_WIF_AUDIENCE"]
+    target = os.environ["GOOGLE_IMPERSONATE_SERVICE_ACCOUNT"]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            sts = await client.post(
+                "https://sts.googleapis.com/v1/token",
+                json={
+                    "grantType": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "audience": audience,
+                    "scope": "https://www.googleapis.com/auth/cloud-platform",
+                    "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
+                    "subjectToken": oidc,
+                    "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+                },
+            )
+            sts.raise_for_status()
+            gen = await client.post(
+                "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+                f"{target}:generateAccessToken",
+                headers={"Authorization": f"Bearer {sts.json()['access_token']}"},
+                json={"scope": [SHEETS_SCOPE]},
+            )
+            gen.raise_for_status()
+            return str(gen.json()["accessToken"])
+    except httpx.HTTPStatusError as exc:
+        raise SheetUnavailable("wif_failed") from exc
+
+
 def _api_token() -> str:
     target = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
     if target:
@@ -197,29 +241,42 @@ def _api_token() -> str:
     return _key_file_token(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
 
-async def _fetch_via_api(sid: str, gid: str) -> list[Product]:
-    headers = {"Authorization": f"Bearer {_api_token()}"}
+async def _bearer_token(oidc: str | None) -> str:
+    # On Vercel (VERCEL=1) WIF is the only viable path; locally fall through to ADC
+    # even when GOOGLE_WIF_AUDIENCE is present in the shared .env.
+    if os.getenv("GOOGLE_WIF_AUDIENCE") and (oidc or os.getenv("VERCEL_OIDC_TOKEN") or os.getenv("VERCEL")):
+        return await _wif_token(oidc)
+    return _api_token()
+
+
+async def _resolve_title(client: httpx.AsyncClient, headers: dict[str, str], sid: str, gid: str) -> str:
+    meta = await client.get(
+        f"{API_BASE}/{sid}",
+        params={"fields": "sheets(properties(sheetId,title))"},
+        headers=headers,
+    )
+    if meta.status_code in (401, 403):
+        raise SheetUnavailable("no_access")
+    if meta.status_code == 404:
+        raise SheetUnavailable("not_found")
+    meta.raise_for_status()
+    title: str | None = next(
+        (
+            s["properties"]["title"]
+            for s in meta.json().get("sheets", [])
+            if str(s["properties"]["sheetId"]) == gid
+        ),
+        None,
+    )
+    if title is None:
+        raise SheetUnavailable("gid_not_found")
+    return title
+
+
+async def _fetch_via_api(sid: str, gid: str, oidc: str | None) -> list[Product]:
+    headers = {"Authorization": f"Bearer {await _bearer_token(oidc)}"}
     async with httpx.AsyncClient(timeout=10) as client:
-        meta = await client.get(
-            f"{API_BASE}/{sid}",
-            params={"fields": "sheets(properties(sheetId,title))"},
-            headers=headers,
-        )
-        if meta.status_code in (401, 403):
-            raise SheetUnavailable("no_access")
-        if meta.status_code == 404:
-            raise SheetUnavailable("not_found")
-        meta.raise_for_status()
-        title: str | None = next(
-            (
-                s["properties"]["title"]
-                for s in meta.json().get("sheets", [])
-                if str(s["properties"]["sheetId"]) == gid
-            ),
-            None,
-        )
-        if title is None:
-            raise SheetUnavailable("gid_not_found")
+        title = await _resolve_title(client, headers, sid, gid)
         escaped = title.replace("'", "''")
         value_range = quote(f"'{escaped}'!A:H", safe="")
         vals = await client.get(
@@ -229,6 +286,87 @@ async def _fetch_via_api(sid: str, gid: str) -> list[Product]:
         )
         vals.raise_for_status()
         return parse_values(vals.json().get("values", []))
+
+
+def _safe_cell(s: str) -> str:
+    """Neutralize formula/DDE triggers in user text (OWASP CSV-injection guidance).
+
+    A leading apostrophe makes Sheets store the value as literal text under
+    USER_ENTERED — the apostrophe itself is an input marker, not cell content.
+    """
+    return "'" + s if s and s[0] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
+def next_free_row(values: list[list[Any]]) -> int:
+    """1-based index of the first row whose A..H cells are all empty.
+
+    Only A:H matters — far rows carry stray I:L formulas in the reference sheet,
+    and unnamed rows with data in B..H must not be overwritten.
+    """
+    last = 0
+    for i, row in enumerate(values, start=1):
+        if any(str(c).strip() for c in row[:8] if c is not None):
+            last = i
+    return last + 1
+
+
+def row_formulas(r: int) -> list[str]:
+    """Columns I..L exactly as the reference sheet computes them per row.
+
+    Function arguments use ';' — the sheet's locale is French (comma decimals),
+    where ',' as an argument separator is a parse error. Google Sheets accepts
+    ';' in dot-decimal locales too, so this is the safe separator either way.
+    """
+    return [
+        f"=H{r}/G{r}",
+        f"=(H{r})/(H{r}*(1-B{r}-C{r}-D{r})-G{r})",
+        f"=H{r} / (H{r} * (1 -B{r}-C{r}-D{r} - F{r}) - G{r})",
+        f'=ROUND(H{r} / (H{r} * (1 -B{r} -C{r}-D{r} - E{r}) - G{r}); 2) & " - " & '
+        f'ROUND(H{r} / (H{r} * (1 -B{r}-C{r}-D{r} - F{r}) - G{r}); 2)',
+    ]
+
+
+async def append_product(product: Product, oidc_token: str | None = None) -> int:
+    """Write the offer as a new sheet row (inputs A..H + formula columns I..L)."""
+    sid = os.getenv("ROAS_SHEET_ID", DEFAULT_SHEET_ID)
+    gid = os.getenv("ROAS_SHEET_GID", DEFAULT_SHEET_GID)
+    headers = {"Authorization": f"Bearer {await _bearer_token(oidc_token)}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            title = await _resolve_title(client, headers, sid, gid)
+            escaped = title.replace("'", "''")
+            read_range = quote(f"'{escaped}'!A1:H", safe="")
+            got = await client.get(f"{API_BASE}/{sid}/values/{read_range}", headers=headers)
+            got.raise_for_status()
+            row = next_free_row(got.json().get("values", []))
+            write_range = quote(f"'{escaped}'!A{row}:L{row}", safe="")
+            update = await client.put(
+                f"{API_BASE}/{sid}/values/{write_range}",
+                params={"valueInputOption": "USER_ENTERED"},
+                headers=headers,
+                json={
+                    "range": f"'{title}'!A{row}:L{row}",
+                    "values": [
+                        [
+                            _safe_cell(product.name),
+                            product.psp_fee,
+                            product.vat,
+                            product.other_fees,
+                            product.min_margin,
+                            product.target_margin,
+                            product.cogs,
+                            product.selling_price,
+                            *row_formulas(row),
+                        ]
+                    ],
+                },
+            )
+            if update.status_code in (401, 403):
+                raise SheetUnavailable("no_write_access")
+            update.raise_for_status()
+            return row
+    except httpx.HTTPError as exc:
+        raise SheetUnavailable("unreachable") from exc
 
 
 async def _fetch_via_csv(sid: str, gid: str) -> list[Product]:
@@ -241,14 +379,14 @@ async def _fetch_via_csv(sid: str, gid: str) -> list[Product]:
     return parse_products(r.text)
 
 
-async def fetch_products() -> list[Product]:
+async def fetch_products(oidc_token: str | None = None) -> list[Product]:
     sid = os.getenv("ROAS_SHEET_ID", DEFAULT_SHEET_ID)
     gid = os.getenv("ROAS_SHEET_GID", DEFAULT_SHEET_GID)
     try:
         if os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT") or os.getenv(
             "GOOGLE_APPLICATION_CREDENTIALS"
         ):
-            return await _fetch_via_api(sid, gid)
+            return await _fetch_via_api(sid, gid, oidc_token)
         return await _fetch_via_csv(sid, gid)
     except httpx.HTTPError as exc:
         raise SheetUnavailable("unreachable") from exc

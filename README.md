@@ -82,10 +82,21 @@ Assertions pin the exact numbers from the reference spreadsheet rows.
 same-origin, so no CORS config needed in production.
 
 In the Vercel project settings, set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (and run
-the two migrations in Supabase so the registry serves from the database). Leave
-`GOOGLE_IMPERSONATE_SERVICE_ACCOUNT` unset on Vercel — impersonation rides on local
-gcloud ADC, which doesn't exist there; sheet presets hide gracefully. For presets in
-production, wire Vercel OIDC → GCP Workload Identity Federation (keyless) later.
+the two migrations in Supabase so the registry serves from the database).
+
+Sheet presets in production use **Workload Identity Federation** (keyless): enable
+OpenID Connect Federation in the Vercel project (Settings → Security, issuer mode
+Team), then set on Vercel:
+
+```
+GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=toolhub-sheets@toolhub-505111.iam.gserviceaccount.com
+GOOGLE_WIF_AUDIENCE=//iam.googleapis.com/projects/67886675912/locations/global/workloadIdentityPools/vercel/providers/vercel
+```
+
+GCP side (once per Vercel team/project): an OIDC provider `vercel` in the pool
+trusting issuer `https://oidc.vercel.com/<team-slug>`, and a
+`roles/iam.workloadIdentityUser` binding on the service account for
+`.../subject/owner:<team-slug>:project:<project-name>:environment:production`.
 
 ## Adding a tool
 

@@ -1,13 +1,16 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type ReactNode,
 } from "react";
 import {
   calcRoas,
+  fetchFxRates,
   fetchSheetProducts,
+  saveSheetProduct,
   type RoasInput,
   type RoasResult,
   type SheetProduct,
@@ -22,7 +25,6 @@ const pctStr = (v: number) => String(Number((v * 100).toFixed(2)));
 
 interface Fields {
   price: string;
-  cogs: string;
   psp: string;
   vat: string;
   other: string;
@@ -30,10 +32,16 @@ interface Fields {
   target: string;
 }
 
+/** One COGS line: base product or an upsell, always in USD. */
+interface CogsLine {
+  id: number;
+  label: string;
+  amount: string;
+}
+
 /** Sheet row 2 as the landing example: 2 Legging UK + Sleeve. */
 const DEFAULTS: Fields = {
   price: "53.55",
-  cogs: "13.80",
   psp: "7",
   vat: "0",
   other: "1",
@@ -41,13 +49,12 @@ const DEFAULTS: Fields = {
   target: "20",
 };
 
-function toInput(f: Fields): RoasInput | null {
+function toInput(f: Fields, cogs: number | null): RoasInput | null {
   const n = (s: string) => Number(s.replace(",", "."));
   const price = n(f.price);
-  const cogs = n(f.cogs);
   const pct = [f.psp, f.vat, f.other, f.min, f.target].map((s) => (s === "" ? 0 : n(s) / 100));
   if (!Number.isFinite(price) || price <= 0) return null;
-  if (!Number.isFinite(cogs) || cogs < 0) return null;
+  if (cogs === null) return null;
   if (pct.some((p) => !Number.isFinite(p) || p < 0 || p >= 1)) return null;
   const [psp_fee, vat, other_fees, min_margin, target_margin] = pct;
   return { selling_price: price, cogs, psp_fee, vat, other_fees, min_margin, target_margin };
@@ -78,21 +85,61 @@ function Field({
 
 export function RoasPage() {
   const [fields, setFields] = useState<Fields>(DEFAULTS);
-  const [currency, setCurrency] = useState("EUR");
+  const [lines, setLines] = useState<CogsLine[]>([{ id: 0, label: "", amount: "13.80" }]);
+  const nextId = useRef(1);
+  const [currency, setCurrency] = useState("USD");
   const [product, setProduct] = useState("");
   const [presets, setPresets] = useState<SheetProduct[]>([]);
+  const [rates, setRates] = useState<Record<string, number> | null>(null);
   const [result, setResult] = useState<RoasResult | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "ok" | "error">("loading");
   const ref = useReveal<HTMLDivElement>();
 
-  const input = useMemo(() => toInput(fields), [fields]);
+  // Sum of the COGS lines (USD). Empty amounts count as 0; a garbage amount
+  // invalidates the whole input rather than silently miscounting.
+  const cogsTotal = useMemo(() => {
+    let sum = 0;
+    for (const l of lines) {
+      const s = l.amount.trim();
+      if (s === "") continue;
+      const n = Number(s.replace(",", "."));
+      if (!Number.isFinite(n) || n < 0) return null;
+      sum += n;
+    }
+    return sum;
+  }, [lines]);
+
+  // COGS is entered in USD; the calculation needs both sides in the display
+  // currency, so convert COGS with the USD-based cross rate at calc time.
+  const fxBlocked = currency !== "USD" && !rates?.[currency];
+  const input = useMemo(() => {
+    const base = toInput(fields, cogsTotal);
+    if (!base || currency === "USD") return base;
+    const rate = rates?.[currency];
+    if (!rate) return null;
+    return { ...base, cogs: base.cogs * rate };
+  }, [fields, cogsTotal, currency, rates]);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    // preset picker is optional — sheet private/unreachable just hides it
+    // preset picker and FX conversion are optional — failures just disable them
     fetchSheetProducts(ctrl.signal).then(setPresets).catch(() => {});
+    fetchFxRates(ctrl.signal).then(setRates).catch(() => {});
     return () => ctrl.abort();
   }, []);
+
+  const changeCurrency = (next: string) => {
+    // selling price follows the display currency; COGS stays in USD
+    if (rates?.[currency] && rates[next]) {
+      const factor = rates[next] / rates[currency];
+      const conv = (s: string) => {
+        const n = Number(s.replace(",", "."));
+        return s.trim() !== "" && Number.isFinite(n) ? (n * factor).toFixed(2) : s;
+      };
+      setFields((f) => ({ ...f, price: conv(f.price) }));
+    }
+    setCurrency(next);
+  };
 
   const loadPreset = (name: string) => {
     setProduct(name === CUSTOM ? "" : name);
@@ -100,36 +147,96 @@ export function RoasPage() {
     if (!p) return;
     setFields({
       price: p.selling_price.toFixed(2),
-      cogs: p.cogs.toFixed(2),
       psp: pctStr(p.psp_fee),
       vat: pctStr(p.vat),
       other: pctStr(p.other_fees),
       min: pctStr(p.min_margin),
       target: pctStr(p.target_margin),
     });
+    // "3 legging UK + sleeve + patch" → one line per component. The sheet only
+    // knows the total COGS, so it lands on line 1; the rest start empty.
+    const parts = p.name.split("+").map((s) => s.trim()).filter(Boolean);
+    setLines(
+      (parts.length ? parts : [p.name]).map((label, i) => ({
+        id: nextId.current++,
+        label,
+        amount: i === 0 ? p.cogs.toFixed(2) : "",
+      })),
+    );
+  };
+
+  const setLine = (id: number, patch: Partial<Omit<CogsLine, "id">>) =>
+    setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const addLine = () =>
+    setLines((ls) => [...ls, { id: nextId.current++, label: "", amount: "" }]);
+  const removeLine = (id: number) =>
+    setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.id !== id) : ls));
+
+  // Save the current offer as a new sheet row; it then shows up as a preset.
+  const [offerName, setOfferName] = useState("");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const suggestedName =
+    lines.map((l) => l.label.trim()).filter(Boolean).join(" + ") || "Custom offer";
+
+  const saveOffer = () => {
+    const base = toInput(fields, cogsTotal); // unconverted: sheet keeps USD COGS
+    if (!base || saveState === "saving") return;
+    setSaveState("saving");
+    setSaveError(null);
+    saveSheetProduct({
+      name: offerName.trim() || suggestedName,
+      psp_fee: base.psp_fee,
+      vat: base.vat,
+      other_fees: base.other_fees,
+      min_margin: base.min_margin,
+      target_margin: base.target_margin,
+      cogs: base.cogs,
+      selling_price: base.selling_price,
+    })
+      .then(() => {
+        setSaveState("done");
+        window.setTimeout(() => setSaveState("idle"), 2500);
+        return fetchSheetProducts().then(setPresets).catch(() => {});
+      })
+      .catch((e: unknown) => {
+        setSaveState("error");
+        setSaveError(e instanceof Error ? e.message : "Saving failed.");
+      });
+  };
+
+  // Explicit calculation: results update on CALCULATE ROAS (and once on load),
+  // and dim as soon as any input drifts from the last computed set.
+  const [dirty, setDirty] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const didInit = useRef(false);
+
+  const calcNow = () => {
+    if (!input) return;
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setState("loading");
+    calcRoas(input, ctrl.signal)
+      .then((r) => {
+        setResult(r);
+        setState("ok");
+        setDirty(false);
+      })
+      .catch((e: unknown) => {
+        if ((e as Error).name !== "AbortError") setState("error");
+      });
   };
 
   useEffect(() => {
+    setDirty(true);
     if (!input) {
       setState("idle");
-      return;
+    } else if (!didInit.current) {
+      didInit.current = true;
+      calcNow();
     }
-    const ctrl = new AbortController();
-    setState("loading");
-    const t = window.setTimeout(() => {
-      calcRoas(input, ctrl.signal)
-        .then((r) => {
-          setResult(r);
-          setState("ok");
-        })
-        .catch((e: unknown) => {
-          if ((e as Error).name !== "AbortError") setState("error");
-        });
-    }, 220);
-    return () => {
-      window.clearTimeout(t);
-      ctrl.abort();
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input]);
 
   const set =
@@ -164,7 +271,7 @@ export function RoasPage() {
     return { be: pos(be), lo: pos(lo), hi: pos(hi) };
   }, [result]);
 
-  const stale = state !== "ok";
+  const stale = state !== "ok" || dirty;
 
   return (
     <div ref={ref} className="page">
@@ -212,7 +319,7 @@ export function RoasPage() {
               <Field label="Currency">
                 <select
                   value={currency}
-                  onChange={(e: ChangeEvent<HTMLSelectElement>) => setCurrency(e.target.value)}
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) => changeCurrency(e.target.value)}
                 >
                   {CURRENCIES.map((c) => (
                     <option key={c} value={c}>
@@ -227,10 +334,77 @@ export function RoasPage() {
               <Field label="Selling price" unit={symbol}>
                 <input type="number" min="0" step="0.01" value={fields.price} onChange={set("price")} />
               </Field>
-              <Field label="COGS" unit={symbol}>
-                <input type="number" min="0" step="0.01" value={fields.cogs} onChange={set("cogs")} />
+              <Field label="COGS total — USD" unit="$">
+                <input type="text" readOnly tabIndex={-1} value={cogsTotal?.toFixed(2) ?? "—"} />
               </Field>
             </div>
+
+            <p className="group-label group-label--row">
+              COGS lines — USD, product + upsells
+              <span className="chip chip--exp">EXPERIMENTAL</span>
+            </p>
+            {lines.map((l, i) => (
+              <div className="cogs-line" key={l.id}>
+                <span className="control control--label">
+                  <input
+                    type="text"
+                    value={l.label}
+                    placeholder={i === 0 ? "Base product" : "Upsell"}
+                    onChange={(e) => setLine(l.id, { label: e.target.value })}
+                  />
+                </span>
+                <span className="control control--amount">
+                  <span className="unit">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={l.amount}
+                    placeholder="0.00"
+                    onChange={(e) => setLine(l.id, { amount: e.target.value })}
+                  />
+                </span>
+                <button
+                  type="button"
+                  className="line-x"
+                  onClick={() => removeLine(l.id)}
+                  disabled={lines.length === 1}
+                  aria-label={`Remove line ${l.label || i + 1}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button type="button" className="add-line" onClick={addLine}>
+              + Add upsell
+            </button>
+
+            <div className="save-row">
+              <span className="control control--label">
+                <input
+                  type="text"
+                  value={offerName}
+                  placeholder={suggestedName}
+                  onChange={(e) => setOfferName(e.target.value)}
+                  aria-label="Offer name for the sheet"
+                />
+              </span>
+              <button
+                type="button"
+                className="add-line save-btn"
+                onClick={saveOffer}
+                disabled={saveState === "saving" || !toInput(fields, cogsTotal)}
+              >
+                {saveState === "saving"
+                  ? "SAVING…"
+                  : saveState === "done"
+                    ? "ADDED ✓"
+                    : "ADD TO SHEET"}
+              </button>
+            </div>
+            {saveState === "error" && saveError && (
+              <div className="banner banner--danger">{saveError}</div>
+            )}
 
             <p className="group-label">Fees — % of price</p>
             <div className="grid-3">
@@ -254,6 +428,15 @@ export function RoasPage() {
                 <input type="number" min="0" step="1" value={fields.target} onChange={set("target")} />
               </Field>
             </div>
+
+            <button
+              type="button"
+              className="calc-btn"
+              onClick={calcNow}
+              disabled={!input || state === "loading"}
+            >
+              {state === "loading" ? "CALCULATING…" : "CALCULATE ROAS"}
+            </button>
           </div>
         </section>
 
@@ -268,8 +451,14 @@ export function RoasPage() {
               API offline — start the backend: <code>uvicorn app.main:app --reload</code>
             </div>
           )}
-          {state === "idle" && (
+          {state === "idle" && !fxBlocked && (
             <div className="banner">Enter a selling price above zero to calculate.</div>
+          )}
+          {fxBlocked && (
+            <div className="banner banner--danger">
+              FX rates unavailable — cannot convert USD COGS to {currency}. Switch back to USD
+              or reload.
+            </div>
           )}
           {result?.warning && state === "ok" && (
             <div className="banner banner--danger">{result.warning}</div>
@@ -345,7 +534,7 @@ export function RoasPage() {
               <p className="stat-val">{fm(result?.contribution)}</p>
             </div>
             <div>
-              <span className="field-name">PRICE / COGS</span>
+              <span className="field-name">PRICE / COGS ({currency})</span>
               <p className="stat-val">
                 {fm(input ? input.selling_price : null)} / {fm(input ? input.cogs : null)}
               </p>
