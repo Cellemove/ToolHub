@@ -48,9 +48,32 @@ Until one path works, the endpoint returns 503 with a hint and the picker hides.
 
 The API serves a built-in tool list until Supabase is configured:
 
-1. Run `supabase/migrations/001_tools.sql` in the Supabase SQL editor.
+1. Run the migrations in order in the Supabase SQL editor. Migration
+   `004_roas_offers.sql` creates and pre-populates the active market/bundle overview.
 2. Copy `.env.example` to `.env`, fill `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
-3. Start the backend with `uvicorn app.main:app --reload --env-file ../.env`.
+3. Set the server-only `SUPABASE_SERVICE_KEY` to enable **Set as active offer**.
+   Do not expose this key through a `VITE_` variable or client code.
+4. Start the backend with `uvicorn app.main:app --reload --env-file ../.env`.
+
+The calculator itself is test mode: changing inputs and calculating never writes a
+record. An operator must explicitly choose **Set as active offer**. That action
+upserts the `(market, product, bundle)` slot, so each slot has exactly one active
+configuration and the overview updates without storing discarded tests.
+Each overview row also has a two-step **Remove → Confirm remove** action. The
+backend deletes only the exact `(market, product, bundle)` slot via the
+server-only service-role credential.
+The calculator also exposes **Add bundle to sheet**, which explicitly appends
+the current price, USD COGS, fees, and margin inputs to the Google Sheet. This
+is independent from **Set as active offer** and prevents exact-name duplicates
+that are already loaded as sheet presets.
+
+All accounting values are USD regardless of market. Selecting a market never
+mutates the selling price or COGS; it only changes the separate display-only FX
+panel. ROAS calculations, active-offer storage, and Google Sheet writes remain USD.
+
+Supported markets are `UK`, `USA`, `CANADA`, `PT`, `PL`, `GR`, `FR`, `DE`,
+`ES`, `MX`, and `CZ`. Markets without a verified active offer remain visible
+with an empty state; the app does not fabricate price or COGS configurations.
 
 ## The math
 

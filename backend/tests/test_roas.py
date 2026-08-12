@@ -87,5 +87,5 @@ def test_tools_fallback_available() -> None:
     assert resp.status_code == 200
     tools = {t["slug"]: t for t in resp.json()}
     assert tools["roas-breakeven"]["url"] is None  # internal tool routes by slug
-    for slug in ("recast", "invoice-checker", "adfactory"):
+    for slug in ("recast", "invoice-checker", "adfactory", "forklane"):
         assert tools[slug]["url"].startswith("https://")

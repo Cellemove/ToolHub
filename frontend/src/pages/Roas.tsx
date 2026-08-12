@@ -4,21 +4,39 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type MouseEvent,
   type ReactNode,
 } from "react";
 import {
   calcRoas,
+  deleteActiveOffer,
+  fetchActiveOffers,
   fetchFxRates,
   fetchSheetProducts,
+  saveActiveOffer,
   saveSheetProduct,
+  type ActiveOffer,
   type RoasInput,
   type RoasResult,
   type SheetProduct,
 } from "../api";
 import { useReveal } from "../useReveal";
 
-const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "CAD", "AUD", "SEK", "AED"];
 const CUSTOM = "__custom__";
+const MARKETS = ["UK", "USA", "CANADA", "PT", "PL", "GR", "FR", "DE", "ES", "MX", "CZ"];
+const MARKET_CURRENCY: Record<string, string> = {
+  UK: "GBP",
+  USA: "USD",
+  CANADA: "CAD",
+  PT: "EUR",
+  PL: "PLN",
+  GR: "EUR",
+  FR: "EUR",
+  DE: "EUR",
+  ES: "EUR",
+  MX: "MXN",
+  CZ: "CZK",
+};
 
 /** 0.07 → "7", 0.155 → "15.5" */
 const pctStr = (v: number) => String(Number((v * 100).toFixed(2)));
@@ -83,16 +101,187 @@ function Field({
   );
 }
 
+function identityFromPreset(name: string) {
+  const matchedMarket = name.match(/\b(UK|USA|US|CANADA|PT|PL|GR|FR|DE|ES|MX|CZ)\b/i)?.[1]?.toUpperCase() ?? "";
+  const market = matchedMarket === "US" ? "USA" : matchedMarket;
+  const product = /\bV2\b/i.test(name) ? "VLegging V2" : "VLegging V1";
+  let bundle = name
+    .replace(/\b(UK|USA|US|CANADA|PT|PL|GR|FR|DE|ES|MX|CZ|V1|V2)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  bundle = bundle.replace(/^(\d+)\s*(legging)?/i, (_, count: string) =>
+    `${count} ${count === "1" ? "Legging" : "Leggings"}`,
+  );
+  bundle = bundle
+    .split("+")
+    .map((part) =>
+      part
+        .trim()
+        .replace(/\b(sleeve|patch)\b/gi, (word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
+        .replace(/\btop bra\b/i, "Top Bra"),
+    )
+    .join(" + ");
+  return { market, product, bundle };
+}
+
+function sheetBundleName(product: string, bundle: string, market: string) {
+  let name = bundle.trim();
+  const version = product.match(/\bV\d+\b/i)?.[0]?.toUpperCase();
+  if (version && !new RegExp(`\\b${version}\\b`, "i").test(name)) name += ` ${version}`;
+  if (market && !new RegExp(`\\b${market}\\b`, "i").test(name)) name += ` ${market}`;
+  return name.trim();
+}
+
+function OfferOverview({
+  offers,
+  state,
+  error,
+  market,
+  onMarketChange,
+  onRemove,
+  removingKey,
+  removeError,
+}: {
+  offers: ActiveOffer[];
+  state: "loading" | "ok" | "error";
+  error: string | null;
+  market: string;
+  onMarketChange: (market: string) => void;
+  onRemove: (offer: ActiveOffer) => void;
+  removingKey: string | null;
+  removeError: string | null;
+}) {
+  const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
+  const shown = useMemo(() => offers.filter((offer) => offer.market === market), [offers, market]);
+  const groups = useMemo(() => {
+    const next = new Map<string, ActiveOffer[]>();
+    for (const offer of shown) next.set(offer.product, [...(next.get(offer.product) ?? []), offer]);
+    return [...next.entries()];
+  }, [shown]);
+  const roas = (value: number | null) => (value == null ? "--" : value.toFixed(2));
+  const handleRemoveClick = (event: MouseEvent<HTMLButtonElement>) => {
+    const key = event.currentTarget.dataset.offerKey;
+    if (!key) return;
+    if (confirmRemoveKey !== key) {
+      setConfirmRemoveKey(key);
+      return;
+    }
+    const offer = shown.find((item) => `${item.market}:${item.product}:${item.bundle}` === key);
+    if (offer) {
+      setConfirmRemoveKey(null);
+      onRemove(offer);
+    }
+  };
+
+  return (
+    <section className="overview shell reveal" style={{ transitionDelay: "100ms" }} aria-label="Active offer overview">
+      <div className="core overview-core">
+        <div className="overview-head">
+          <div>
+            <p className="eyebrow">ACTIVE CONFIGURATION</p>
+            <h2>Break-even by market &amp; bundle</h2>
+            <p className="overview-copy">
+              One registered offer per slot. Calculator tests below never appear here unless you set them active.
+            </p>
+          </div>
+          <label className="field market-picker">
+            <span className="field-name">Market</span>
+            <span className="control">
+              <select value={market} onChange={(event) => onMarketChange(event.target.value)}>
+                {MARKETS.map((item) => <option key={item} value={item}>{item}</option>)}
+              </select>
+            </span>
+          </label>
+        </div>
+
+        {state === "loading" && <div className="overview-empty">Loading active offers...</div>}
+        {state === "error" && <div className="banner banner--danger">{error ?? "Active offers are unavailable."}</div>}
+        {removeError && <div className="banner banner--danger">{removeError}</div>}
+        {state === "ok" && groups.length === 0 && <div className="overview-empty">No active offers registered for this market.</div>}
+        {state === "ok" && groups.map(([product, productOffers]) => (
+          <div className="offer-group" key={product}>
+            <div className="offer-group-title">
+              <h3>{product}</h3>
+              <span>{productOffers.length} {productOffers.length === 1 ? "bundle" : "bundles"}</span>
+            </div>
+            <div className="offer-table-wrap">
+              <table className="offer-table">
+                <thead>
+                  <tr>
+                    <th>Bundle</th>
+                    <th>Break-even</th>
+                    <th>Min ROAS</th>
+                    <th>Target ROAS</th>
+                    <th>Price</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productOffers.map((offer) => {
+                    const key = `${offer.market}:${offer.product}:${offer.bundle}`;
+                    return (
+                      <tr key={key}>
+                        <td><span className="status-dot" aria-hidden="true" />{offer.bundle}</td>
+                        <td className="offer-be">{roas(offer.roas_breakeven)}</td>
+                        <td>{roas(offer.roas_at_min_margin)}</td>
+                        <td>{roas(offer.roas_at_target_margin)}</td>
+                        <td>{offer.currency} {offer.selling_price.toFixed(2)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="remove-offer"
+                            data-offer-key={key}
+                            onClick={handleRemoveClick}
+                            disabled={removingKey !== null}
+                            aria-label={
+                              confirmRemoveKey === key
+                                ? `Confirm removal of ${offer.bundle} from ${offer.product} in ${offer.market}`
+                                : `Remove ${offer.bundle} from ${offer.product} in ${offer.market}`
+                            }
+                          >
+                            {removingKey === key
+                              ? "Removing..."
+                              : confirmRemoveKey === key
+                                ? "Confirm remove"
+                                : "Remove"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function RoasPage() {
   const [fields, setFields] = useState<Fields>(DEFAULTS);
   const [lines, setLines] = useState<CogsLine[]>([{ id: 0, label: "", amount: "13.80" }]);
   const nextId = useRef(1);
-  const [currency, setCurrency] = useState("USD");
   const [product, setProduct] = useState("");
   const [presets, setPresets] = useState<SheetProduct[]>([]);
   const [rates, setRates] = useState<Record<string, number> | null>(null);
   const [result, setResult] = useState<RoasResult | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "ok" | "error">("loading");
+  const [offers, setOffers] = useState<ActiveOffer[]>([]);
+  const [offersState, setOffersState] = useState<"loading" | "ok" | "error">("loading");
+  const [offersError, setOffersError] = useState<string | null>(null);
+  const [overviewMarket, setOverviewMarket] = useState("UK");
+  const [activeMarket, setActiveMarket] = useState("UK");
+  const [activeProduct, setActiveProduct] = useState("VLegging V1");
+  const [activeBundle, setActiveBundle] = useState("2 Leggings + Sleeve");
+  const [registerState, setRegisterState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [sheetSaveState, setSheetSaveState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [sheetSaveError, setSheetSaveError] = useState<string | null>(null);
+  const [sheetRow, setSheetRow] = useState<number | null>(null);
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const ref = useReveal<HTMLDivElement>();
 
   // Sum of the COGS lines (USD). Empty amounts count as 0; a garbage amount
@@ -109,42 +298,37 @@ export function RoasPage() {
     return sum;
   }, [lines]);
 
-  // COGS is entered in USD; the calculation needs both sides in the display
-  // currency, so convert COGS with the USD-based cross rate at calc time.
-  const fxBlocked = currency !== "USD" && !rates?.[currency];
-  const input = useMemo(() => {
-    const base = toInput(fields, cogsTotal);
-    if (!base || currency === "USD") return base;
-    const rate = rates?.[currency];
-    if (!rate) return null;
-    return { ...base, cogs: base.cogs * rate };
-  }, [fields, cogsTotal, currency, rates]);
+  // USD is the accounting currency for inputs, calculations, storage, and Sheets.
+  const input = useMemo(() => toInput(fields, cogsTotal), [fields, cogsTotal]);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    // preset picker and FX conversion are optional — failures just disable them
+    // Presets and FX are optional; the active overview reports its own failure.
     fetchSheetProducts(ctrl.signal).then(setPresets).catch(() => {});
     fetchFxRates(ctrl.signal).then(setRates).catch(() => {});
+    fetchActiveOffers(ctrl.signal)
+      .then((next) => {
+        setOffers(next);
+        setOffersState("ok");
+      })
+      .catch((error: unknown) => {
+        if ((error as Error).name === "AbortError") return;
+        setOffersState("error");
+        setOffersError(error instanceof Error ? error.message : "Active offers are unavailable.");
+      });
     return () => ctrl.abort();
   }, []);
-
-  const changeCurrency = (next: string) => {
-    // selling price follows the display currency; COGS stays in USD
-    if (rates?.[currency] && rates[next]) {
-      const factor = rates[next] / rates[currency];
-      const conv = (s: string) => {
-        const n = Number(s.replace(",", "."));
-        return s.trim() !== "" && Number.isFinite(n) ? (n * factor).toFixed(2) : s;
-      };
-      setFields((f) => ({ ...f, price: conv(f.price) }));
-    }
-    setCurrency(next);
-  };
 
   const loadPreset = (name: string) => {
     setProduct(name === CUSTOM ? "" : name);
     const p = presets.find((x) => x.name === name);
     if (!p) return;
+    const identity = identityFromPreset(p.name);
+    if (identity.market) {
+      setActiveMarket(identity.market);
+    }
+    setActiveProduct(identity.product);
+    setActiveBundle(identity.bundle);
     setFields({
       price: p.selling_price.toFixed(2),
       psp: pctStr(p.psp_fee),
@@ -172,38 +356,22 @@ export function RoasPage() {
   const removeLine = (id: number) =>
     setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.id !== id) : ls));
 
-  // Save the current offer as a new sheet row; it then shows up as a preset.
-  const [offerName, setOfferName] = useState("");
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "done" | "error">("idle");
-  const [saveError, setSaveError] = useState<string | null>(null);
   const suggestedName =
     lines.map((l) => l.label.trim()).filter(Boolean).join(" + ") || "Custom offer";
+  const sheetName = sheetBundleName(
+    activeProduct,
+    activeBundle.trim() || suggestedName,
+    activeMarket,
+  );
+  const alreadyInSheet = presets.some(
+    (preset) => preset.name.trim().toLowerCase() === sheetName.toLowerCase(),
+  );
 
-  const saveOffer = () => {
-    const base = toInput(fields, cogsTotal); // unconverted: sheet keeps USD COGS
-    if (!base || saveState === "saving") return;
-    setSaveState("saving");
-    setSaveError(null);
-    saveSheetProduct({
-      name: offerName.trim() || suggestedName,
-      psp_fee: base.psp_fee,
-      vat: base.vat,
-      other_fees: base.other_fees,
-      min_margin: base.min_margin,
-      target_margin: base.target_margin,
-      cogs: base.cogs,
-      selling_price: base.selling_price,
-    })
-      .then(() => {
-        setSaveState("done");
-        window.setTimeout(() => setSaveState("idle"), 2500);
-        return fetchSheetProducts().then(setPresets).catch(() => {});
-      })
-      .catch((e: unknown) => {
-        setSaveState("error");
-        setSaveError(e instanceof Error ? e.message : "Saving failed.");
-      });
-  };
+  useEffect(() => {
+    setSheetSaveState("idle");
+    setSheetSaveError(null);
+    setSheetRow(null);
+  }, [sheetName, fields, cogsTotal]);
 
   // Explicit calculation: results update on CALCULATE ROAS (and once on load),
   // and dim as soon as any input drifts from the last computed set.
@@ -228,6 +396,97 @@ export function RoasPage() {
       });
   };
 
+  const registerActiveOffer = () => {
+    const base = toInput(fields, cogsTotal);
+    const market = activeMarket.trim().toUpperCase();
+    const registeredProduct = activeProduct.trim();
+    const bundle = activeBundle.trim() || suggestedName;
+    if (!base || !market || !registeredProduct || !bundle || registerState === "saving") return;
+    setRegisterState("saving");
+    setRegisterError(null);
+    saveActiveOffer({
+      market,
+      product: registeredProduct,
+      bundle,
+      currency: "USD",
+      selling_price: base.selling_price,
+      cogs_usd: base.cogs,
+      psp_fee: base.psp_fee,
+      vat: base.vat,
+      other_fees: base.other_fees,
+      min_margin: base.min_margin,
+      target_margin: base.target_margin,
+    })
+      .then(() => {
+        setRegisterState("done");
+        setOverviewMarket(market);
+        return fetchActiveOffers()
+          .then((next) => {
+            setOffers(next);
+            setOffersState("ok");
+            setOffersError(null);
+          })
+          .catch((error: unknown) => {
+            setOffersState("error");
+            setOffersError(error instanceof Error ? error.message : "Active offer saved; overview refresh failed.");
+          });
+      })
+      .catch((error: unknown) => {
+        setRegisterState("error");
+        setRegisterError(error instanceof Error ? error.message : "Could not set the active offer.");
+      });
+  };
+
+  const addBundleToSheet = () => {
+    const base = toInput(fields, cogsTotal);
+    if (!base || !sheetName || alreadyInSheet || sheetSaveState === "saving") return;
+    setSheetSaveState("saving");
+    setSheetSaveError(null);
+    setSheetRow(null);
+    saveSheetProduct({
+      name: sheetName,
+      psp_fee: base.psp_fee,
+      vat: base.vat,
+      other_fees: base.other_fees,
+      min_margin: base.min_margin,
+      target_margin: base.target_margin,
+      cogs: base.cogs,
+      selling_price: base.selling_price,
+    })
+      .then(({ row }) => {
+        setSheetRow(row);
+        setSheetSaveState("done");
+        return fetchSheetProducts()
+          .then(setPresets)
+          .catch(() => {});
+      })
+      .catch((error: unknown) => {
+        setSheetSaveState("error");
+        setSheetSaveError(error instanceof Error ? error.message : "Could not add the bundle to Google Sheets.");
+      });
+  };
+
+  const removeActiveOffer = (offer: ActiveOffer) => {
+    const key = `${offer.market}:${offer.product}:${offer.bundle}`;
+    setRemovingKey(key);
+    setRemoveError(null);
+    deleteActiveOffer({ market: offer.market, product: offer.product, bundle: offer.bundle })
+      .then(() => {
+        setOffers((current) =>
+          current.filter(
+            (item) =>
+              item.market !== offer.market ||
+              item.product !== offer.product ||
+              item.bundle !== offer.bundle,
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        setRemoveError(error instanceof Error ? error.message : "Could not remove the active offer.");
+      })
+      .finally(() => setRemovingKey(null));
+  };
+
   useEffect(() => {
     setDirty(true);
     if (!input) {
@@ -245,15 +504,19 @@ export function RoasPage() {
       setFields((f) => ({ ...f, [k]: e.target.value }));
 
   const money = useMemo(
-    () => new Intl.NumberFormat(undefined, { style: "currency", currency }),
-    [currency],
-  );
-  const symbol = useMemo(
-    () => money.formatToParts(0).find((p) => p.type === "currency")?.value ?? currency,
-    [money, currency],
+    () => new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }),
+    [],
   );
   const fm = (v: number | null | undefined) => (v == null ? "—" : money.format(v));
   const fx = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
+  const localCurrency = MARKET_CURRENCY[activeMarket] ?? "USD";
+  const localRate = localCurrency === "USD" ? 1 : rates?.[localCurrency];
+  const localMoney = useMemo(
+    () => new Intl.NumberFormat(undefined, { style: "currency", currency: localCurrency }),
+    [localCurrency],
+  );
+  const local = (value: number | null | undefined) =>
+    value == null || localRate == null ? "—" : localMoney.format(value * localRate);
 
   const band = useMemo(() => {
     if (
@@ -290,6 +553,17 @@ export function RoasPage() {
         </p>
       </header>
 
+      <OfferOverview
+        offers={offers}
+        state={offersState}
+        error={offersError}
+        market={overviewMarket}
+        onMarketChange={setOverviewMarket}
+        onRemove={removeActiveOffer}
+        removingKey={removingKey}
+        removeError={removeError}
+      />
+
       <div className="tool-grid">
         <section className="shell reveal" style={{ transitionDelay: "120ms" }} aria-label="Inputs">
           <div className="core form">
@@ -316,22 +590,13 @@ export function RoasPage() {
                   />
                 )}
               </Field>
-              <Field label="Currency">
-                <select
-                  value={currency}
-                  onChange={(e: ChangeEvent<HTMLSelectElement>) => changeCurrency(e.target.value)}
-                >
-                  {CURRENCIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+              <Field label="Accounting currency">
+                <input type="text" readOnly tabIndex={-1} value="USD" />
               </Field>
             </div>
 
             <div className="grid-2">
-              <Field label="Selling price" unit={symbol}>
+              <Field label="Selling price — USD" unit="$">
                 <input type="number" min="0" step="0.01" value={fields.price} onChange={set("price")} />
               </Field>
               <Field label="COGS total — USD" unit="$">
@@ -379,33 +644,6 @@ export function RoasPage() {
               + Add upsell
             </button>
 
-            <div className="save-row">
-              <span className="control control--label">
-                <input
-                  type="text"
-                  value={offerName}
-                  placeholder={suggestedName}
-                  onChange={(e) => setOfferName(e.target.value)}
-                  aria-label="Offer name for the sheet"
-                />
-              </span>
-              <button
-                type="button"
-                className="add-line save-btn"
-                onClick={saveOffer}
-                disabled={saveState === "saving" || !toInput(fields, cogsTotal)}
-              >
-                {saveState === "saving"
-                  ? "SAVING…"
-                  : saveState === "done"
-                    ? "ADDED ✓"
-                    : "ADD TO SHEET"}
-              </button>
-            </div>
-            {saveState === "error" && saveError && (
-              <div className="banner banner--danger">{saveError}</div>
-            )}
-
             <p className="group-label">Fees — % of price</p>
             <div className="grid-3">
               <Field label="PSP" suffix="%">
@@ -437,6 +675,92 @@ export function RoasPage() {
             >
               {state === "loading" ? "CALCULATING…" : "CALCULATE ROAS"}
             </button>
+
+            <div className="activation">
+              <div className="activation-head">
+                <div>
+                  <p className="group-label activation-label">Active offer</p>
+                  <p>Test mode is the default. Save only when these numbers should replace the active configuration.</p>
+                </div>
+                <span className="chip chip--test">TEST</span>
+              </div>
+              <div className="grid-3 active-fields">
+                <Field label="Market">
+                  <select
+                    value={activeMarket}
+                    onChange={(event) => {
+                      const market = event.target.value;
+                      setActiveMarket(market);
+                    }}
+                  >
+                    {MARKETS.map((market) => <option key={market} value={market}>{market}</option>)}
+                  </select>
+                </Field>
+                <Field label="Product">
+                  <input
+                    type="text"
+                    value={activeProduct}
+                    onChange={(event) => setActiveProduct(event.target.value)}
+                    placeholder="VLegging V1"
+                  />
+                </Field>
+                <Field label="Bundle">
+                  <input
+                    type="text"
+                    value={activeBundle}
+                    onChange={(event) => setActiveBundle(event.target.value)}
+                    placeholder={suggestedName}
+                  />
+                </Field>
+              </div>
+              <div className="activation-actions">
+                <button
+                  type="button"
+                  className="activate-btn"
+                  onClick={registerActiveOffer}
+                  disabled={
+                    stale ||
+                    registerState === "saving" ||
+                    !activeMarket.trim() ||
+                    !activeProduct.trim() ||
+                    !(activeBundle.trim() || suggestedName)
+                  }
+                >
+                  {registerState === "saving"
+                    ? "SAVING ACTIVE OFFER…"
+                    : registerState === "done"
+                      ? "ACTIVE OFFER UPDATED ✓"
+                      : "SET AS ACTIVE OFFER"}
+                </button>
+                <button
+                  type="button"
+                  className="sheet-btn"
+                  onClick={addBundleToSheet}
+                  disabled={
+                    !toInput(fields, cogsTotal) ||
+                    !sheetName ||
+                    alreadyInSheet ||
+                    sheetSaveState === "saving"
+                  }
+                  title={sheetName ? `Sheet row name: ${sheetName}` : undefined}
+                >
+                  {sheetSaveState === "saving"
+                      ? "ADDING TO SHEET…"
+                      : sheetSaveState === "done"
+                        ? `ADDED TO ROW ${sheetRow ?? ""} ✓`
+                        : alreadyInSheet
+                          ? "ALREADY IN SHEET"
+                          : "ADD BUNDLE TO SHEET"}
+                </button>
+              </div>
+              <p className="sheet-name-preview">Google Sheet row: <strong>{sheetName || "—"}</strong></p>
+              {registerState === "error" && registerError && (
+                <div className="banner banner--danger">{registerError}</div>
+              )}
+              {sheetSaveState === "error" && sheetSaveError && (
+                <div className="banner banner--danger">{sheetSaveError}</div>
+              )}
+            </div>
           </div>
         </section>
 
@@ -451,14 +775,8 @@ export function RoasPage() {
               API offline — start the backend: <code>uvicorn app.main:app --reload</code>
             </div>
           )}
-          {state === "idle" && !fxBlocked && (
+          {state === "idle" && (
             <div className="banner">Enter a selling price above zero to calculate.</div>
-          )}
-          {fxBlocked && (
-            <div className="banner banner--danger">
-              FX rates unavailable — cannot convert USD COGS to {currency}. Switch back to USD
-              or reload.
-            </div>
           )}
           {result?.warning && state === "ok" && (
             <div className="banner banner--danger">{result.warning}</div>
@@ -534,10 +852,52 @@ export function RoasPage() {
               <p className="stat-val">{fm(result?.contribution)}</p>
             </div>
             <div>
-              <span className="field-name">PRICE / COGS ({currency})</span>
+              <span className="field-name">PRICE / COGS (USD)</span>
               <p className="stat-val">
                 {fm(input ? input.selling_price : null)} / {fm(input ? input.cogs : null)}
               </p>
+            </div>
+          </div>
+
+          <div className="shell conversion-card">
+            <div className="core">
+              <div className="conversion-head">
+                <div>
+                  <span className="field-name">MARKET CONVERSION — DISPLAY ONLY</span>
+                  <h3>{activeMarket} · {localCurrency}</h3>
+                </div>
+                <span className="chip chip--test">FX</span>
+              </div>
+              {localRate == null ? (
+                <div className="banner banner--danger">
+                  FX rate unavailable. USD calculations and saved values are unaffected.
+                </div>
+              ) : (
+                <>
+                  <p className="conversion-rate">1 USD = {localRate.toFixed(4)} {localCurrency}</p>
+                  <div className="conversion-grid">
+                    <div>
+                      <span className="field-name">SELLING PRICE</span>
+                      <p className="stat-val">{local(input?.selling_price)}</p>
+                    </div>
+                    <div>
+                      <span className="field-name">COGS</span>
+                      <p className="stat-val">{local(input?.cogs)}</p>
+                    </div>
+                    <div>
+                      <span className="field-name">CONTRIBUTION</span>
+                      <p className="stat-val">{local(result?.contribution)}</p>
+                    </div>
+                    <div>
+                      <span className="field-name">MAX AD SPEND</span>
+                      <p className="stat-val">{local(result?.breakeven_cpa)}</p>
+                    </div>
+                  </div>
+                  <p className="conversion-note">
+                    Reference conversion only. Calculations, active offers, and Google Sheet rows remain in USD.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </section>

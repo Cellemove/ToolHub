@@ -30,6 +30,44 @@ export interface RoasResult {
   warning: string | null;
 }
 
+/** The one registered offer for a market/product/bundle slot. */
+export interface ActiveOffer {
+  market: string;
+  product: string;
+  bundle: string;
+  currency: string;
+  selling_price: number;
+  cogs_usd: number;
+  psp_fee: number;
+  vat: number;
+  other_fees: number;
+  min_margin: number;
+  target_margin: number;
+  status: "active";
+  roas_breakeven: number | null;
+  roas_at_min_margin: number | null;
+  roas_at_target_margin: number | null;
+  breakeven_cpa: number | null;
+  warning: "fx_unavailable" | "not_profitable" | null;
+}
+
+export type ActiveOfferInput = Pick<
+  ActiveOffer,
+  | "market"
+  | "product"
+  | "bundle"
+  | "currency"
+  | "selling_price"
+  | "cogs_usd"
+  | "psp_fee"
+  | "vat"
+  | "other_fees"
+  | "min_margin"
+  | "target_margin"
+>;
+
+export type ActiveOfferKey = Pick<ActiveOffer, "market" | "product" | "bundle">;
+
 /** Product preset row from the reference Google Sheet. */
 export interface SheetProduct {
   name: string;
@@ -83,4 +121,23 @@ export const calcRoas = (input: RoasInput, signal?: AbortSignal): Promise<RoasRe
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
     signal,
+  });
+
+export const fetchActiveOffers = (signal?: AbortSignal): Promise<ActiveOffer[]> =>
+  request<ActiveOffer[]>("/api/roas/offers", { signal });
+
+/** Explicitly replace the active configuration for this market/product/bundle. */
+export const saveActiveOffer = (offer: ActiveOfferInput): Promise<{ status: string }> =>
+  request<{ status: string }>("/api/roas/offers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(offer),
+  });
+
+/** Permanently remove one exact active market/product/bundle slot. */
+export const deleteActiveOffer = (offer: ActiveOfferKey): Promise<{ status: string }> =>
+  request<{ status: string }>("/api/roas/offers", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(offer),
   });
