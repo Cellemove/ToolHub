@@ -9,6 +9,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .offers import (
+    OFFER_HINTS,
+    OfferIn,
+    OfferKey,
+    OfferMetrics,
+    OffersUnavailable,
+    delete_offer,
+    enrich,
+    fetch_offers,
+    upsert_offer,
+)
 from .roas import compute
 from .sheet import (
     Product,
@@ -135,7 +146,7 @@ async def tools() -> list[Tool]:
     return FALLBACK_TOOLS
 
 
-CURRENCIES = ("EUR", "USD", "GBP", "CHF", "CAD", "AUD", "SEK", "AED")
+CURRENCIES = ("EUR", "USD", "GBP", "CHF", "CAD", "AUD", "SEK", "AED", "PLN", "MXN", "CZK")
 FX_URL = "https://open.er-api.com/v6/latest/USD"
 FX_TTL_SECONDS = 12 * 3600
 
@@ -147,26 +158,73 @@ class FxResponse(BaseModel):
     rates: dict[str, float]
 
 
-@app.get("/api/fx", response_model=FxResponse)
-async def fx_rates() -> FxResponse:
-    """USD-based exchange rates for the supported currencies (cached ~12h)."""
+async def get_fx_rates() -> dict[str, float] | None:
+    """Cached USD-based rates; stale beats missing; None when nothing is available."""
     global _fx_cache
     if _fx_cache and time.monotonic() - _fx_cache[0] < FX_TTL_SECONDS:
-        return FxResponse(base="USD", rates=_fx_cache[1])
+        return _fx_cache[1]
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(FX_URL)
             r.raise_for_status()
             data = r.json()
-    except httpx.HTTPError as exc:
-        if _fx_cache:  # serve stale rather than fail
-            return FxResponse(base="USD", rates=_fx_cache[1])
-        raise HTTPException(status_code=503, detail="FX rates unavailable.") from exc
+    except httpx.HTTPError:
+        return _fx_cache[1] if _fx_cache else None
     rates = {c: float(data["rates"][c]) for c in CURRENCIES if c in data.get("rates", {})}
     if len(rates) < len(CURRENCIES):
         log.warning("FX feed missing currencies: %s", set(CURRENCIES) - set(rates))
     _fx_cache = (time.monotonic(), rates)
+    return rates
+
+
+@app.get("/api/fx", response_model=FxResponse)
+async def fx_rates() -> FxResponse:
+    """USD-based exchange rates for the supported currencies (cached ~12h)."""
+    rates = await get_fx_rates()
+    if rates is None:
+        raise HTTPException(status_code=503, detail="FX rates unavailable.")
     return FxResponse(base="USD", rates=rates)
+
+
+@app.get("/api/roas/offers", response_model=list[OfferMetrics])
+async def roas_offers() -> list[OfferMetrics]:
+    """Registered offers with computed break-even metrics (market overview)."""
+    try:
+        offers = await fetch_offers()
+    except OffersUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Offers unavailable ({exc.reason}). {OFFER_HINTS.get(exc.reason, '')}",
+        ) from exc
+    return [enrich(o) for o in offers]
+
+
+@app.post("/api/roas/offers", status_code=201)
+async def register_offer(offer: OfferIn) -> dict[str, str]:
+    """Upsert the active offer for (market, product, bundle)."""
+    try:
+        await upsert_offer(offer)
+    except OffersUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot register ({exc.reason}). {OFFER_HINTS.get(exc.reason, '')}",
+        ) from exc
+    return {"status": "registered"}
+
+
+@app.delete("/api/roas/offers")
+async def remove_roas_offer(offer: OfferKey) -> dict[str, str]:
+    """Remove exactly one active market/product/bundle configuration."""
+    try:
+        deleted = await delete_offer(offer)
+    except OffersUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot remove ({exc.reason}). {OFFER_HINTS.get(exc.reason, '')}",
+        ) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Active offer not found.")
+    return {"status": "removed"}
 
 
 @app.get("/api/roas/products", response_model=list[Product])
