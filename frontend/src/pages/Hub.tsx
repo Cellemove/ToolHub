@@ -39,6 +39,13 @@ function Glyph({ name }: { name: string }) {
       </svg>
     );
   }
+  if (name === "call") {
+    return (
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
+        <path d="M4 3.5h3l1.5 4-2 1.5a10 10 0 0 0 4.5 4.5l1.5-2 4 1.5v3c0 .5-.5 1-1 1C9 17 3 11 3 4.5c0-.5.5-1 1-1Z" {...stroke} strokeLinejoin="round" />
+      </svg>
+    );
+  }
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
       <circle cx="6" cy="6" r="1.6" fill="currentColor" />

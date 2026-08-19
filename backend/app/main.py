@@ -96,6 +96,15 @@ FALLBACK_TOOLS = [
         sort=5,
         url="https://forklane.vercel.app/",
     ),
+    Tool(
+        slug="cellucall",
+        name="CelluCall",
+        description="Call-center workspace — delivered-order call lists from Shopify, synced live.",
+        icon="call",
+        status="live",
+        sort=6,
+        url="https://cellu-call.vercel.app",
+    ),
 ]
 
 
