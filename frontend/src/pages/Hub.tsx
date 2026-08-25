@@ -39,6 +39,13 @@ function Glyph({ name }: { name: string }) {
       </svg>
     );
   }
+  if (name === "teardown") {
+    return (
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
+        <path d="M4.5 5.5h8M6 10h8M4.5 14.5h8M15.5 3.5v13" {...stroke} />
+      </svg>
+    );
+  }
   if (name === "call") {
     return (
       <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
