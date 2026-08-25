@@ -105,6 +105,15 @@ FALLBACK_TOOLS = [
         sort=6,
         url="https://cellu-call.vercel.app",
     ),
+    Tool(
+        slug="teardown",
+        name="Teardown",
+        description="Winning-ad deconstruction — Gemini watches the ad and returns a frame-by-frame script plus the 14-part workbook.",
+        icon="teardown",
+        status="live",
+        sort=7,
+        url="https://teardown-gamma.vercel.app",
+    ),
 ]
 
 

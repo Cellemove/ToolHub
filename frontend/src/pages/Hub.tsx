@@ -39,6 +39,13 @@ function Glyph({ name }: { name: string }) {
       </svg>
     );
   }
+  if (name === "teardown") {
+    return (
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
+        <path d="M4.5 5.5h8M6 10h8M4.5 14.5h8M15.5 3.5v13" {...stroke} />
+      </svg>
+    );
+  }
   if (name === "call") {
     return (
       <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none">
@@ -56,6 +63,27 @@ function Glyph({ name }: { name: string }) {
   );
 }
 
+function ToolIcon({ tool }: { tool: Tool }) {
+  const [failed, setFailed] = useState(false);
+  let host: string | null = null;
+  try {
+    host = tool.url ? new URL(tool.url).hostname : null;
+  } catch {
+    // bad url in DB — keep the glyph
+  }
+  if (!host || failed) return <Glyph name={tool.icon} />;
+  return (
+    <img
+      src={`https://www.google.com/s2/favicons?domain=${host}&sz=64`}
+      width={20}
+      height={20}
+      alt=""
+      style={{ borderRadius: 5 }}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function ToolCard({ tool, wide, delay }: { tool: Tool; wide: boolean; delay: number }) {
   const live = tool.status === "live";
   const external = live && !!tool.url;
@@ -70,7 +98,7 @@ function ToolCard({ tool, wide, delay }: { tool: Tool; wide: boolean; delay: num
       <div className="core card-core">
         <div className="card-top">
           <span className="icon-tile">
-            <Glyph name={tool.icon} />
+            <ToolIcon tool={tool} />
           </span>
           <span className={`chip${live ? " chip--live" : ""}`}>{live ? "LIVE" : "SOON"}</span>
         </div>
