@@ -63,23 +63,26 @@ function Glyph({ name }: { name: string }) {
   );
 }
 
+// Tried in order; a 404 body fails to decode as an image, so onError advances.
+const FAVICON_PATHS = ["/favicon.ico", "/favicon.svg", "/icon.svg"];
+
 function ToolIcon({ tool }: { tool: Tool }) {
-  const [failed, setFailed] = useState(false);
-  let host: string | null = null;
+  const [i, setI] = useState(0);
+  let origin: string | null = null;
   try {
-    host = tool.url ? new URL(tool.url).hostname : null;
+    origin = tool.url ? new URL(tool.url).origin : null;
   } catch {
     // bad url in DB — keep the glyph
   }
-  if (!host || failed) return <Glyph name={tool.icon} />;
+  if (!origin || i >= FAVICON_PATHS.length) return <Glyph name={tool.icon} />;
   return (
     <img
-      src={`https://www.google.com/s2/favicons?domain=${host}&sz=64`}
+      src={origin + FAVICON_PATHS[i]}
       width={20}
       height={20}
       alt=""
       style={{ borderRadius: 5 }}
-      onError={() => setFailed(true)}
+      onError={() => setI(i + 1)}
     />
   );
 }
