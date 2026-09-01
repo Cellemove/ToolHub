@@ -34,11 +34,27 @@ def test_usd_offer_ignores_rate() -> None:
     assert m.warning is None
 
 
-def test_market_currency_is_ignored_for_accounting() -> None:
+def test_usd_price_ignores_rate() -> None:
     m = enrich(offer(), usd_rate=0.75)
     expected = 47.90 / (47.90 * 0.92 - 17.97)
     assert m.roas_breakeven == pytest.approx(expected)
     assert m.currency == "USD"
+
+
+def test_non_usd_price_converts_via_rate() -> None:
+    # 38.32 GBP at 0.8 GBP/USD = 47.90 USD — same metrics as the USD row.
+    m = enrich(offer(currency="GBP", selling_price=38.32), usd_rate=0.8)
+    expected = 47.90 / (47.90 * 0.92 - 17.97)
+    assert m.roas_breakeven == pytest.approx(expected)
+    assert m.currency == "GBP"
+    assert m.selling_price == 38.32
+
+
+def test_non_usd_without_rate_flags_fx_unavailable() -> None:
+    m = enrich(offer(currency="CZK", selling_price=999.0), usd_rate=None)
+    assert m.roas_breakeven is None
+    assert m.breakeven_cpa is None
+    assert m.warning == "fx_unavailable"
 
 
 def test_missing_fx_does_not_block_usd_metrics() -> None:
@@ -61,9 +77,13 @@ def test_offer_identity_is_normalized() -> None:
     assert normalized.currency == "USD"
 
 
-def test_non_usd_accounting_currency_is_rejected() -> None:
-    with pytest.raises(ValueError, match="currency must be USD"):
-        offer(currency="GBP")
+def test_supported_currency_is_normalized() -> None:
+    assert offer(currency=" gbp ").currency == "GBP"
+
+
+def test_unknown_currency_is_rejected() -> None:
+    with pytest.raises(ValueError, match="currency must be one of"):
+        offer(currency="XXX")
 
 
 def test_us_market_alias_becomes_usa() -> None:

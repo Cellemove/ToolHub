@@ -67,9 +67,11 @@ the current price, USD COGS, fees, and margin inputs to the Google Sheet. This
 is independent from **Set as active offer** and prevents exact-name duplicates
 that are already loaded as sheet presets.
 
-All accounting values are USD regardless of market. Selecting a market never
-mutates the selling price or COGS; it only changes the separate display-only FX
-panel. ROAS calculations, active-offer storage, and Google Sheet writes remain USD.
+The selling price can be entered in any supported currency (USD, EUR, GBP, CZK,
+PLN, MXN, CAD, CHF, AUD, SEK, AED); COGS stays USD. ROAS math and Google Sheet
+writes convert the price to USD via the FX rates, while active offers store the
+price in its own currency and the backend converts when computing metrics.
+Selecting a market never mutates inputs; it only changes the display-only FX panel.
 
 Supported markets are `UK`, `USA`, `CANADA`, `PT`, `PL`, `GR`, `FR`, `DE`,
 `ES`, `MX`, and `CZ`. Markets without a verified active offer remain visible
