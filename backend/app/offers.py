@@ -14,6 +14,7 @@ from .roas import compute
 
 TABLE_URL = "{base}/rest/v1/roas_offers"
 SUPPORTED_MARKETS = ("UK", "USA", "CANADA", "PT", "PL", "GR", "FR", "DE", "ES", "MX", "CZ")
+SUPPORTED_CURRENCIES = ("USD", "EUR", "GBP", "CHF", "CAD", "AUD", "SEK", "AED", "PLN", "MXN", "CZK")
 
 
 class OfferKey(BaseModel):
@@ -54,8 +55,8 @@ class OfferIn(OfferKey):
         if not isinstance(value, str):
             return value
         normalized = value.strip().upper()
-        if normalized != "USD":
-            raise ValueError("currency must be USD; market FX is display-only")
+        if normalized not in SUPPORTED_CURRENCIES:
+            raise ValueError(f"currency must be one of: {', '.join(SUPPORTED_CURRENCIES)}")
         return normalized
 
 
@@ -87,10 +88,26 @@ OFFER_HINTS = {
 
 
 def enrich(offer: Offer, usd_rate: float | None = None) -> OfferMetrics:
-    """Attach metrics using USD accounting values; market FX is display-only."""
-    del usd_rate
+    """Attach metrics. ``usd_rate`` is units of ``offer.currency`` per USD.
+
+    COGS is always USD; a non-USD selling price converts via ``usd_rate``
+    before the math. Without a rate, metrics are unknown, not wrong.
+    """
+    if offer.currency == "USD":
+        price_usd = offer.selling_price
+    elif usd_rate and usd_rate > 0:
+        price_usd = offer.selling_price / usd_rate
+    else:
+        return OfferMetrics(
+            **offer.model_dump(),
+            roas_breakeven=None,
+            roas_at_min_margin=None,
+            roas_at_target_margin=None,
+            breakeven_cpa=None,
+            warning="fx_unavailable",
+        )
     result = compute(
-        price=offer.selling_price,
+        price=price_usd,
         cogs=offer.cogs_usd,
         psp_fee=offer.psp_fee,
         vat=offer.vat,
@@ -99,7 +116,7 @@ def enrich(offer: Offer, usd_rate: float | None = None) -> OfferMetrics:
         target_margin=offer.target_margin,
     )
     return OfferMetrics(
-        **{**offer.model_dump(), "currency": "USD"},
+        **offer.model_dump(),
         roas_breakeven=result.roas_breakeven,
         roas_at_min_margin=result.roas_at_min_margin,
         roas_at_target_margin=result.roas_at_target_margin,

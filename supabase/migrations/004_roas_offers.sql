@@ -22,8 +22,7 @@ alter table public.roas_offers enable row level security;
 
 -- Normalize the former shorthand if this migration is reapplied to an early table.
 update public.roas_offers set market = 'USA' where market = 'US';
--- Money is always stored as USD; market currencies are frontend display-only.
-update public.roas_offers set currency = 'USD' where currency <> 'USD';
+-- selling_price is stored in `currency`; cogs_usd stays USD (metrics convert via FX).
 
 create policy "public read roas_offers"
   on public.roas_offers for select

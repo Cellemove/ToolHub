@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .offers import (
     OFFER_HINTS,
+    SUPPORTED_CURRENCIES,
     OfferIn,
     OfferKey,
     OfferMetrics,
@@ -164,7 +165,7 @@ async def tools() -> list[Tool]:
     return FALLBACK_TOOLS
 
 
-CURRENCIES = ("EUR", "USD", "GBP", "CHF", "CAD", "AUD", "SEK", "AED", "PLN", "MXN", "CZK")
+CURRENCIES = SUPPORTED_CURRENCIES
 FX_URL = "https://open.er-api.com/v6/latest/USD"
 FX_TTL_SECONDS = 12 * 3600
 
@@ -214,7 +215,9 @@ async def roas_offers() -> list[OfferMetrics]:
             status_code=503,
             detail=f"Offers unavailable ({exc.reason}). {OFFER_HINTS.get(exc.reason, '')}",
         ) from exc
-    return [enrich(o) for o in offers]
+    # FX only matters for non-USD selling prices; skip the fetch otherwise.
+    rates = await get_fx_rates() if any(o.currency != "USD" for o in offers) else None
+    return [enrich(o, (rates or {}).get(o.currency)) for o in offers]
 
 
 @app.post("/api/roas/offers", status_code=201)

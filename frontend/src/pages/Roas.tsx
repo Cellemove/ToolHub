@@ -24,6 +24,7 @@ import { useReveal } from "../useReveal";
 
 const CUSTOM = "__custom__";
 const MARKETS = ["UK", "USA", "CANADA", "PT", "PL", "GR", "FR", "DE", "ES", "MX", "CZ"];
+const CURRENCIES = ["USD", "EUR", "GBP", "CZK", "PLN", "MXN", "CAD", "CHF", "AUD", "SEK", "AED"];
 const MARKET_CURRENCY: Record<string, string> = {
   UK: "GBP",
   USA: "USD",
@@ -67,15 +68,17 @@ const DEFAULTS: Fields = {
   target: "20",
 };
 
-function toInput(f: Fields, cogs: number | null): RoasInput | null {
+/** ``usdRate`` is units of the price currency per USD; the math stays USD. */
+function toInput(f: Fields, cogs: number | null, usdRate: number | null): RoasInput | null {
   const n = (s: string) => Number(s.replace(",", "."));
   const price = n(f.price);
   const pct = [f.psp, f.vat, f.other, f.min, f.target].map((s) => (s === "" ? 0 : n(s) / 100));
   if (!Number.isFinite(price) || price <= 0) return null;
   if (cogs === null) return null;
+  if (usdRate == null || usdRate <= 0) return null;
   if (pct.some((p) => !Number.isFinite(p) || p < 0 || p >= 1)) return null;
   const [psp_fee, vat, other_fees, min_margin, target_margin] = pct;
-  return { selling_price: price, cogs, psp_fee, vat, other_fees, min_margin, target_margin };
+  return { selling_price: price / usdRate, cogs, psp_fee, vat, other_fees, min_margin, target_margin };
 }
 
 function Field({
@@ -261,6 +264,7 @@ function OfferOverview({
 
 export function RoasPage() {
   const [fields, setFields] = useState<Fields>(DEFAULTS);
+  const [currency, setCurrency] = useState("USD");
   const [lines, setLines] = useState<CogsLine[]>([{ id: 0, label: "", amount: "13.80" }]);
   const nextId = useRef(1);
   const [product, setProduct] = useState("");
@@ -298,8 +302,13 @@ export function RoasPage() {
     return sum;
   }, [lines]);
 
-  // USD is the accounting currency for inputs, calculations, storage, and Sheets.
-  const input = useMemo(() => toInput(fields, cogsTotal), [fields, cogsTotal]);
+  // USD is the accounting currency for calculations and Sheets; the selling
+  // price may be entered in any supported currency and converts via FX.
+  const priceRate = currency === "USD" ? 1 : rates?.[currency] ?? null;
+  const input = useMemo(
+    () => toInput(fields, cogsTotal, priceRate),
+    [fields, cogsTotal, priceRate],
+  );
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -329,6 +338,7 @@ export function RoasPage() {
     }
     setActiveProduct(identity.product);
     setActiveBundle(identity.bundle);
+    setCurrency("USD"); // sheet rows are USD by convention
     setFields({
       price: p.selling_price.toFixed(2),
       psp: pctStr(p.psp_fee),
@@ -397,7 +407,7 @@ export function RoasPage() {
   };
 
   const registerActiveOffer = () => {
-    const base = toInput(fields, cogsTotal);
+    const base = toInput(fields, cogsTotal, priceRate);
     const market = activeMarket.trim().toUpperCase();
     const registeredProduct = activeProduct.trim();
     const bundle = activeBundle.trim() || suggestedName;
@@ -408,8 +418,9 @@ export function RoasPage() {
       market,
       product: registeredProduct,
       bundle,
-      currency: "USD",
-      selling_price: base.selling_price,
+      currency,
+      // Stored as entered, in its own currency; cogs_usd stays USD.
+      selling_price: Number(fields.price.replace(",", ".")),
       cogs_usd: base.cogs,
       psp_fee: base.psp_fee,
       vat: base.vat,
@@ -438,7 +449,8 @@ export function RoasPage() {
   };
 
   const addBundleToSheet = () => {
-    const base = toInput(fields, cogsTotal);
+    // base.selling_price is already USD, matching the sheet convention.
+    const base = toInput(fields, cogsTotal, priceRate);
     if (!base || !sheetName || alreadyInSheet || sheetSaveState === "saving") return;
     setSheetSaveState("saving");
     setSheetSaveError(null);
@@ -590,13 +602,20 @@ export function RoasPage() {
                   />
                 )}
               </Field>
-              <Field label="Accounting currency">
-                <input type="text" readOnly tabIndex={-1} value="USD" />
+              <Field label="Price currency">
+                <select
+                  value={currency}
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) => setCurrency(e.target.value)}
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
               </Field>
             </div>
 
             <div className="grid-2">
-              <Field label="Selling price — USD" unit="$">
+              <Field label={`Selling price — ${currency}`} unit={currency === "USD" ? "$" : currency}>
                 <input type="number" min="0" step="0.01" value={fields.price} onChange={set("price")} />
               </Field>
               <Field label="COGS total — USD" unit="$">
@@ -737,7 +756,7 @@ export function RoasPage() {
                   className="sheet-btn"
                   onClick={addBundleToSheet}
                   disabled={
-                    !toInput(fields, cogsTotal) ||
+                    !input ||
                     !sheetName ||
                     alreadyInSheet ||
                     sheetSaveState === "saving"
@@ -775,7 +794,12 @@ export function RoasPage() {
               API offline — start the backend: <code>uvicorn app.main:app --reload</code>
             </div>
           )}
-          {state === "idle" && (
+          {priceRate == null && (
+            <div className="banner banner--danger">
+              FX rate for {currency} is unavailable — cannot convert the selling price to USD.
+            </div>
+          )}
+          {state === "idle" && priceRate != null && (
             <div className="banner">Enter a selling price above zero to calculate.</div>
           )}
           {result?.warning && state === "ok" && (
